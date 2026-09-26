@@ -6,8 +6,7 @@ Scene Switching Tool by Greeny.
 
 Add this git repository URL to your Unity project's Packages/manifest.json:
 
-`json
+```json
 "dependencies": {
-    "com.greeny.sceneswitcher": "git+https://github.com/JibbeGreen/SceneSwitcher.git"
-}
-`
+    "com.greeny.sceneswitcher": "git+https://github.com/JibbeGreen/SceneSwitcher.git"}
+```
