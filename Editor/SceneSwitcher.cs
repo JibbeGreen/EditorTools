@@ -4,8 +4,8 @@ using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
-namespace Greeny.Editor {
-
+namespace Greeny.Editor 
+{
     public static class SceneSwitcher
     {
         private const string MainMenuScene = "Assets/Scenes/MainMenu.unity";
@@ -56,6 +56,7 @@ namespace Greeny.Editor {
         public static void LoadMainMenu()
         {
             OpenScenes(
+                BootstrapperScene,
                 MainMenuScene
             );
         }
@@ -64,10 +65,10 @@ namespace Greeny.Editor {
         public static void LoadMainGame()
         {
             OpenScenes(
+                BootstrapperScene,
                 GameplayScene,
                 Level01Scene,
-                UIScene,
-                BootstrapperScene
+                UIScene
             );
         }
 
@@ -83,6 +84,7 @@ namespace Greeny.Editor {
         public static void LoadUIScene()
         {
             OpenScenes(
+                BootstrapperScene,
                 UIScene
             );
         }
