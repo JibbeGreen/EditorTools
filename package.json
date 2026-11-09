@@ -3,7 +3,7 @@
     "version": "1.0.0",
     "displayName": "Scene Switcher",
     "description": "Scene Switching Tool by Greeny.",
-    "unity": "2022.3",
+    "unity": "6000.6",
     "dependencies": {},
     "keywords": [
         "tool",
