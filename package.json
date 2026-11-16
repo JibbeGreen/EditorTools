@@ -1,8 +1,8 @@
 {
     "name": "com.greeny.editortools",
-    "version": "2.1.0",
+    "version": "3.0.0",
     "displayName": "Greeny Editor Tools",
-    "description": "Editor-only tools by Greeny: scene switcher menu and an in-game developer console (F1 in play mode).",
+    "description": "Editor-only tools by Greeny: scene switcher toolbar dropdown (driven by scene groups when Greeny Scene Management is installed) and an in-game developer console (F1 in play mode).",
     "unity": "6000.6",
     "dependencies": {
         "com.unity.inputsystem": "1.11.0"

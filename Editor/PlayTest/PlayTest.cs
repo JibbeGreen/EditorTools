@@ -12,8 +12,9 @@ namespace Greeny.Editor
     /// Enters Play mode straight into a gameplay scene group, skipping the main menu and the intro cinematic,
     /// while still booting through the Bootstrapper (DI, SceneLoader, game state event) like the real game.
     /// <para>
-    /// Built for automated/CLI testing: <c>unity command editor invoke_menu --path "Play Test/Level01"</c>, or
-    /// <c>PlayTest.Play("SG_Level02")</c> from a script. When gameplay is up, the console logs
+    /// Start it from <c>Play Test/Selected Scene Group</c> with a SceneGroupConfig selected (also usable from the CLI via
+    /// invoke_menu), or with <c>PlayTest.Play("SG_Level01")</c>
+    /// from a script. When gameplay is up, the console logs
     /// <see cref="ReadyLog"/> followed by the loaded group name.
     /// </para>
     /// <para>
@@ -42,8 +43,6 @@ namespace Greeny.Editor
         const string RestoreBootstrapperKey = "Greeny.PlayTest.RestoreBootstrapperToggle";
 
         const string MenuRoot = "Play Test/";
-        const string Level01Group = "SG_Level01";
-        const string Level02Group = "SG_Level02";
 
         public static bool IsActive => SessionState.GetBool(ActiveKey, false);
 
@@ -60,17 +59,16 @@ namespace Greeny.Editor
 
         #region Menu
 
-        [MenuItem(MenuRoot + "Level01 (Scene State)", priority = 0)]
-        static void PlayLevel01() => Play(Level01Group);
+        // Menu bar entries stay for CLI use (invoke_menu). Select a SceneGroupConfig in the Project window first.
+        [MenuItem(MenuRoot + "Selected Scene Group", priority = 0)]
+        static void PlaySelectedGroup() => Play(((SceneGroupConfig)Selection.activeObject).name);
 
-        [MenuItem(MenuRoot + "Level02 (Scene State)", priority = 1)]
-        static void PlayLevel02() => Play(Level02Group);
+        [MenuItem(MenuRoot + "Selected Scene Group", true)]
+        static bool CanPlaySelectedGroup() => CanPlay() && Selection.activeObject is SceneGroupConfig;
 
         [MenuItem(MenuRoot + "Continue Latest Save", priority = 20)]
         static void ContinueLatest() => Play(null, LatestSave);
 
-        [MenuItem(MenuRoot + "Level01 (Scene State)", true)]
-        [MenuItem(MenuRoot + "Level02 (Scene State)", true)]
         [MenuItem(MenuRoot + "Continue Latest Save", true)]
         static bool CanPlay() => !EditorApplication.isPlayingOrWillChangePlaymode;
 
@@ -136,7 +134,7 @@ namespace Greeny.Editor
         static void OnSceneLoaded(Scene p_scene, LoadSceneMode p_mode)
         {
             if (!Application.isPlaying || !SessionState.GetBool(PendingKey, false)) return;
-            if (p_scene.buildIndex != 0) return;
+            if (p_scene.path != Bootstrapper.EditorScenePath) return;
 
             SessionState.SetBool(PendingKey, false);
 

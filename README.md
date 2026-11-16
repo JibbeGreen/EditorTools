@@ -4,7 +4,9 @@ Editor-only tools by Greeny. Nothing in this package ends up in a build.
 
 | Assembly | Contents |
 | --- | --- |
-| `Greeny.EditorTools.SceneSwitcher` | **Switch Scene** menu that opens the Bootstrapper + a level in one click. |
+| `Greeny.EditorTools.SceneSwitcher` | Scene dropdown in the main toolbar. Lists the build scenes; other assemblies add sections to it. |
+| `Greeny.EditorTools.SceneGroups` | Adds every `SceneGroupConfig` to the dropdown. Only compiled when `com.greeny.scenemanagement` is installed. |
+| `SceneSwitcher.PlayTest` | Play mode straight into a scene group or the latest save. Needs `com.greeny.scenemanagement` and `com.greeny.persistence`. |
 | `Greeny.EditorTools.DevConsole` | In-game developer console (F1 in play mode). Compiled only in the editor (`UNITY_EDITOR` define constraint). |
 
 ## Installation
@@ -14,6 +16,35 @@ Add this git repository URL to your Unity project's Packages/manifest.json:
 ```json
 "dependencies": {
     "com.greeny.editortools": "https://github.com/JibbeGreen/EditorTools.git"
+}
+```
+
+## Scene switcher
+
+The dropdown sits in the middle of the main toolbar and shows the active scene. Right-click the toolbar to move or
+hide it (**Greeny/Scene Switcher**).
+
+| Entry | Does |
+| --- | --- |
+| *Group name* | Opens the scene that contains the `Bootstrapper` component, then the group's scenes. The scene marked `ActiveScene` becomes active. Ticked when the whole group is open |
+| Load Bootstrapper On Play | Same toggle as **Scene Loading > Load Bootstrapper On Play**. On: Play starts from the Bootstrapper and goes to the main menu. Off: Play runs the open scenes as they are |
+| Scenes > *scene* | Opens the Bootstrapper plus that scene (set as active). Lists the enabled build scenes, then scenes only used by scene groups |
+
+The Bootstrapper is only added when `com.greeny.scenemanagement` is installed; without it, groups and the toggle are
+hidden and **Scenes** opens the single scene. Play Test stays in the menu bar (**Play Test/...**) for CLI use.
+
+Groups are the `SceneGroupConfig` assets in the project, labelled with their `GroupName` (the asset name is added when
+two groups share a name). Nothing is hardcoded, so the tool works the same in every project.
+
+Add your own entries from an editor assembly:
+
+```csharp
+[InitializeOnLoad]
+static class MyScenes
+{
+    static MyScenes() => SceneSwitcher.AddMenuSection(50, menu =>
+        menu.AddItem("Tools/Lighting Test", false, SceneSwitcher.CanOpenScenes,
+            () => SceneSwitcher.OpenScenes("Assets/Scenes/LightingTest.unity")));
 }
 ```
 

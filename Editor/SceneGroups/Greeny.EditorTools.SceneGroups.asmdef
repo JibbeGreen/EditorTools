@@ -1,0 +1,28 @@
+{
+    "name": "Greeny.EditorTools.SceneGroups",
+    "rootNamespace": "Greeny.Editor",
+    "references": [
+        "Greeny.EditorTools.SceneSwitcher",
+        "Greeny.SceneManagement",
+        "Eflatun.SceneReference"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": false,
+    "defineConstraints": [
+        "GREENY_SCENEMANAGEMENT"
+    ],
+    "versionDefines": [
+        {
+            "name": "com.greeny.scenemanagement",
+            "expression": "1.0.4",
+            "define": "GREENY_SCENEMANAGEMENT"
+        }
+    ],
+    "noEngineReferences": false
+}

@@ -1,3 +1,30 @@
+## \[3.0.0] - 2026-11-16
+
+### Scene switcher
+
+* The project-specific **Switch Scene** menu is gone. The switcher no longer contains any scene paths.
+* New scene dropdown in the main toolbar (Unity 6.3+), showing the active scene. It lists:
+  * every `SceneGroupConfig` in the project (when `com.greeny.scenemanagement` is installed). Opening a group opens the
+    scene that contains the `Bootstrapper` (found by component, not build order) plus the group's scenes, with the group's `ActiveScene` set as active.
+  * **Load Bootstrapper On Play** toggle (same EditorPref as the Scene Loading menu).
+  * **Scenes**: the enabled build scenes, plus scenes only used by scene groups. Opens the Bootstrapper plus that scene.
+* Groups are found each time the dropdown opens, so new or renamed groups need no code change or recompile.
+* `SceneSwitcher.AddMenuSection` / `AddSceneSource` let other editor assemblies add their own entries.
+* Requires `com.greeny.scenemanagement` 1.0.4 or newer for the scene group and Play Test parts.
+* `SceneSwitcher.OpenScenes(paths, activeScenePath)` overload, `OpenWithBootstrapper`, `FirstEnabledBuildScenePath`
+  and the `BootstrapperScenePath` hook (set by the scene group switcher).
+* New optional assembly `Greeny.EditorTools.SceneGroups` (`SceneGroupSwitcher.FindGroups()`, `Open(config)`).
+
+### Play Test
+
+* Removed the hardcoded `Play Test/Level01 (Scene State)` and `Level02` entries. Use `Play Test/Selected Scene Group`
+  with a `SceneGroupConfig` selected (also works with `invoke_menu` from the CLI), or `PlayTest.Play("SG_Name")`.
+
+### Breaking
+
+* `SceneSwitcher.LoadMainMenu`, `LoadLevel01`, `LoadLevel02`, `LoadBootstrapperScene` and `LoadUIScene` are removed.
+* `SceneSwitcher.OpenScenes` now returns `bool`.
+
 ## \[2.1.0] - 2026-11-16
 
 ### Developer console
