@@ -12,9 +12,13 @@ namespace Greeny.EditorTools
     /// In-game developer console, editor only. Press F1 in play mode to open it, type a command, Enter to run.
     /// <para>
     /// Commands are static methods marked with <see cref="DevCommandAttribute"/> anywhere in the project, or
-    /// added at runtime through <see cref="DevCommandRegistry.Register"/>. Type <c>help</c> to list them.
+    /// added at runtime through <see cref="DevCommandRegistry.Register(string,string,Action{string[]},DevSuggestionProvider,string)"/>.
+    /// Type <c>help</c> to list them.
     /// </para>
-    /// Keys: Enter runs, Up/Down browse history, Tab completes, Esc or F1 closes.
+    /// While typing, a suggestion list for the command name or current argument pops up above the input and the hint
+    /// line shows the usage with the current argument highlighted (red when an argument is invalid).
+    /// Keys: Enter runs, Tab / Shift+Tab accept and cycle suggestions, Up/Down pick a suggestion (or browse history
+    /// when the list is closed; typed text filters the history), Esc hides the list or closes, F1 closes.
     /// While open, keyboard and mouse are disconnected from the Input System so typing never moves the
     /// player or triggers hotkeys; they reconnect when it closes. Created automatically when play mode starts.
     /// </summary>
@@ -25,19 +29,25 @@ namespace Greeny.EditorTools
         public const KeyCode ToggleKey = KeyCode.F1;
 
         private const int MaxLines = 500;
-        private const int MaxHistory = 100;
-        private const int MaxListedMatches = 40;
+        private const int MaxHistory = 200;
+        private const int MaxPopupRows = 10;
         private const float HeightFraction = 0.45f;
         private const string InputControlName = "Greeny.DevConsole.Input";
         #endregion
 
         private enum LineKind { Echo, Info, Warning, Error }
 
+        private static readonly Color HintDim = new(0.55f, 0.6f, 0.68f);
+        private static readonly Color HintActive = new(1f, 0.93f, 0.55f);
+        private static readonly Color HintError = new(1f, 0.45f, 0.4f);
+        private static readonly Color PopupText = new(0.82f, 0.84f, 0.88f);
+        private static readonly Color PopupSelected = new(1f, 0.93f, 0.4f);
+
         #region STATIC STATE
         private static DevConsole _instance;
         private static readonly List<(string text, LineKind kind)> _lines = new();
-        // Survives play sessions on purpose (domain reload may be disabled): Up recalls last session's commands.
-        private static readonly List<string> _history = new();
+        // Loaded from EditorPrefs on first use and saved on every command, so it survives play sessions and restarts.
+        private static List<string> _history;
         // Devices this console disabled. Static so they can still be re-enabled if the instance dies unexpectedly.
         private static readonly List<InputDevice> _suspendedDevices = new();
 
@@ -51,6 +61,7 @@ namespace Greeny.EditorTools
         #region INSTANCE STATE
         private string _input = string.Empty;
         private int _historyIndex = -1; // -1 = not browsing
+        private string _historyPrefix = string.Empty; // what was typed when browsing started; filters the history
         private Vector2 _scroll;
         private bool _scrollToBottom;
         private bool _focusInput;
@@ -61,15 +72,33 @@ namespace Greeny.EditorTools
         private CursorLockMode _previousLockState;
         private bool _previousCursorVisible;
 
-        private string _hintSource;
-        private string _hint = string.Empty;
-
         private Texture2D _panelTexture;
         private Texture2D _inputTexture;
+        private Texture2D _popupTexture;
+        private Texture2D _selectedTexture;
         private GUIStyle _lineStyle;
         private GUIStyle _inputStyle;
+        private GUIStyle _ghostStyle;
         private GUIStyle _hintStyle;
+        private GUIStyle _popupStyle;
         private Font _font;
+        #endregion
+
+        #region COMPLETION STATE
+        private readonly List<string> _suggestions = new();
+        private readonly List<string> _tokens = new(); // complete tokens before the one being typed (command name first)
+        private string _suggestSource;  // the input _suggestions were built for
+        private int _selected;
+        private int _popupFirst;        // first visible popup row
+        private int _tokenStart;        // index in _input where the token being completed starts
+        private string _partial = string.Empty;
+        private bool _partialQuoted;
+        private string _dismissedFor;   // Esc hid the list for this exact input
+        private string _cycleInput;     // the input as Tab last left it: Tab again cycles through the same list
+
+        private readonly List<(string text, Color color)> _hintSegments = new();
+        private string _hintSource;
+        private int _hintSelected = -1;
         #endregion
 
         #region BOOTSTRAP
@@ -112,6 +141,15 @@ namespace Greeny.EditorTools
 
         public static void Clear() => _lines.Clear();
 
+        /// <summary>Commands typed in this project, oldest first. Kept in EditorPrefs.</summary>
+        public static IReadOnlyList<string> History => LoadedHistory;
+
+        public static void ClearHistory()
+        {
+            LoadedHistory.Clear();
+            SaveHistory();
+        }
+
         /// <summary>Runs a command line as if it was typed (it is echoed and logged, but not added to history).</summary>
         public static void Execute(string p_line)
         {
@@ -149,6 +187,8 @@ namespace Greeny.EditorTools
             CloseInternal();
             if (_panelTexture != null) Destroy(_panelTexture);
             if (_inputTexture != null) Destroy(_inputTexture);
+            if (_popupTexture != null) Destroy(_popupTexture);
+            if (_selectedTexture != null) Destroy(_selectedTexture);
             if (_font != null) Destroy(_font);
             if (_instance == this) _instance = null;
         }
@@ -228,9 +268,15 @@ namespace Greeny.EditorTools
                 _moveCaretToEnd = false;
             }
 
-            // Hint line: matching commands, or the usage + suggestions of the command being typed.
+            RefreshSuggestions();
+            DrawGhostText(inputRect);
+
+            // Hint line: usage of the command being typed with the current argument highlighted.
             RefreshHint();
-            GUI.Label(new Rect(pad, height - hintHeight - pad + 2f, width - pad * 2, hintHeight), _hint, _hintStyle);
+            DrawHint(new Rect(pad, height - hintHeight - pad + 2f, width - pad * 2, hintHeight));
+
+            // Last, so it's drawn over the output.
+            if (PopupVisible) DrawPopup(e, inputRect, width - pad);
 
             GUI.matrix = previousMatrix;
         }
@@ -253,7 +299,7 @@ namespace Greeny.EditorTools
             _scrollToBottom = true;
             _closeOnRelease = false;
 
-            if (_lines.Count == 0) Log("Developer console. Type 'help' for commands. Tab completes, Esc closes.");
+            if (_lines.Count == 0) Log("Developer console. Type 'help' for commands. Tab completes, Up/Down for history, Esc closes.");
 
             Opened?.Invoke();
         }
@@ -313,6 +359,12 @@ namespace Greeny.EditorTools
                     OpenInternal();
                     _waitForToggleRelease = true;
                 }
+                else if (p_event.keyCode == KeyCode.Escape && PopupVisible)
+                {
+                    // First Esc only hides the suggestion list (until the input changes).
+                    _dismissedFor = _input;
+                    _cycleInput = null;
+                }
                 else if (!_waitForToggleRelease)
                 {
                     _closeOnRelease = true;
@@ -333,6 +385,8 @@ namespace Greeny.EditorTools
         {
             if (p_event.type != EventType.KeyDown) return;
 
+            RefreshSuggestions();
+
             switch (p_event.keyCode)
             {
                 case KeyCode.Return:
@@ -341,15 +395,22 @@ namespace Greeny.EditorTools
                     p_event.Use();
                     break;
                 case KeyCode.UpArrow:
-                    BrowseHistory(-1);
+                    if (PopupVisible) MoveSelection(-1);
+                    else BrowseHistory(-1);
                     p_event.Use();
                     break;
                 case KeyCode.DownArrow:
-                    BrowseHistory(+1);
+                    if (PopupVisible) MoveSelection(+1);
+                    else BrowseHistory(+1);
                     p_event.Use();
                     break;
                 case KeyCode.Tab:
-                    Autocomplete();
+                    TabComplete(p_event.shift ? -1 : +1);
+                    p_event.Use();
+                    break;
+                case KeyCode.RightArrow when PopupVisible && CaretAtEnd():
+                    // Like accepting the grey preview text.
+                    TabComplete(+1);
                     p_event.Use();
                     break;
                 default:
@@ -364,144 +425,322 @@ namespace Greeny.EditorTools
             string line = _input.Trim();
             _input = string.Empty;
             _historyIndex = -1;
+            _cycleInput = null;
+            _dismissedFor = null;
             _scrollToBottom = true;
             _focusInput = true;
             if (line.Length == 0) return;
 
-            if (_history.Count == 0 || _history[^1] != line) _history.Add(line);
-            if (_history.Count > MaxHistory) _history.RemoveAt(0);
-
+            AddToHistory(line);
             Execute(line);
         }
 
+        private bool CaretAtEnd()
+        {
+            if (GUI.GetNameOfFocusedControl() != InputControlName) return true;
+            var editor = (TextEditor)GUIUtility.GetStateObject(typeof(TextEditor), GUIUtility.keyboardControl);
+            return editor.cursorIndex >= _input.Length && editor.selectIndex >= _input.Length;
+        }
+
+        private void SetInput(string p_value)
+        {
+            _input = p_value;
+            _moveCaretToEnd = true;
+        }
+        #endregion
+
+        #region HISTORY
+        private static string HistoryKey => "Greeny.DevConsole.History." + Application.dataPath;
+
+        private static List<string> LoadedHistory
+        {
+            get
+            {
+                if (_history != null) return _history;
+                string saved = EditorPrefs.GetString(HistoryKey, string.Empty);
+                _history = saved.Split('\n').Where(l => l.Length > 0).ToList();
+                return _history;
+            }
+        }
+
+        private static void SaveHistory() => EditorPrefs.SetString(HistoryKey, string.Join("\n", LoadedHistory));
+
+        // Newest last. Running a command again moves it to the end instead of adding a duplicate.
+        private static void AddToHistory(string p_line)
+        {
+            List<string> history = LoadedHistory;
+            history.Remove(p_line);
+            history.Add(p_line);
+            if (history.Count > MaxHistory) history.RemoveRange(0, history.Count - MaxHistory);
+            SaveHistory();
+        }
+
+        // Up = older, Down = newer. Only entries starting with what was typed before browsing are visited,
+        // so "sp" + Up walks through earlier spawn commands.
         private void BrowseHistory(int p_direction)
         {
-            if (_history.Count == 0) return;
+            List<string> history = LoadedHistory;
+            if (history.Count == 0) return;
 
-            if (p_direction < 0)
+            if (_historyIndex < 0)
             {
-                _historyIndex = _historyIndex < 0 ? _history.Count - 1 : Mathf.Max(0, _historyIndex - 1);
+                if (p_direction > 0) return;
+                _historyPrefix = _input;
             }
-            else
+
+            int index = _historyIndex < 0 ? history.Count : _historyIndex;
+            do index += p_direction;
+            while (index >= 0 && index < history.Count && !MatchesHistoryPrefix(history[index]));
+
+            if (index < 0) return; // already at the oldest match
+
+            if (index >= history.Count)
             {
-                if (_historyIndex < 0) return;
-                _historyIndex++;
-                if (_historyIndex >= _history.Count)
+                _historyIndex = -1;
+                SetInput(_historyPrefix);
+                return;
+            }
+
+            _historyIndex = index;
+            SetInput(history[index]);
+        }
+
+        private bool MatchesHistoryPrefix(string p_entry) =>
+            _historyPrefix.Length == 0 ||
+            (p_entry.StartsWith(_historyPrefix, StringComparison.OrdinalIgnoreCase) &&
+             !p_entry.Equals(_historyPrefix, StringComparison.OrdinalIgnoreCase));
+        #endregion
+
+        #region SUGGESTIONS
+        private bool PopupVisible => _suggestions.Count > 0 && _historyIndex < 0 && _input.Length > 0 && _dismissedFor != _input;
+
+        // Rebuilds the list for the token at the end of the input. Cheap enough per keystroke; cached per input string.
+        private void RefreshSuggestions()
+        {
+            if (_suggestSource == _input) return;
+            _suggestSource = _input;
+
+            // Tab cycling keeps the list (and the token start) it began with.
+            if (_cycleInput != null && _input == _cycleInput) return;
+            _cycleInput = null;
+
+            _suggestions.Clear();
+            _selected = 0;
+            _popupFirst = 0;
+            _tokens.Clear();
+
+            List<string> tokens = DevCommandRegistry.Tokenize(_input, out _partial, out _tokenStart, out _partialQuoted);
+            if (_tokenStart < _input.Length) tokens.RemoveAt(tokens.Count - 1); // the token being typed
+            _tokens.AddRange(tokens);
+
+            IEnumerable<string> options;
+            if (_tokens.Count == 0) options = DevCommandRegistry.All.Select(c => c.Name);
+            else if (DevCommandRegistry.TryGet(_tokens[0], out DevCommand command))
+                options = command.GetSuggestions(_tokens.Count - 1, _tokens.Skip(1).ToList());
+            else return;
+
+            // Prefix matches first, then the ones that contain the text anywhere.
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            List<string> all = options.ToList();
+            foreach (string option in all.Where(o => o.StartsWith(_partial, StringComparison.OrdinalIgnoreCase)))
+                if (seen.Add(option)) _suggestions.Add(option);
+            foreach (string option in all.Where(o => o.IndexOf(_partial, StringComparison.OrdinalIgnoreCase) > 0))
+                if (seen.Add(option)) _suggestions.Add(option);
+
+            // Already typed in full: nothing left to suggest.
+            if (_suggestions.Count == 1 && _suggestions[0].Equals(_partial, StringComparison.OrdinalIgnoreCase))
+                _suggestions.Clear();
+        }
+
+        private void MoveSelection(int p_delta)
+        {
+            if (_suggestions.Count == 0) return;
+            _selected = (_selected + p_delta + _suggestions.Count) % _suggestions.Count;
+
+            // While Tab-cycling the arrows keep replacing the token.
+            if (_cycleInput != null && _input == _cycleInput) AcceptSelected(false, true);
+        }
+
+        // First Tab inserts the selected suggestion (plus a space when it's the only one, so the next argument's
+        // list opens). Further Tabs cycle through the same list, Shift+Tab backwards.
+        private void TabComplete(int p_direction)
+        {
+            bool cycling = _cycleInput != null && _input == _cycleInput && _suggestions.Count > 0;
+            if (cycling)
+            {
+                _selected = (_selected + p_direction + _suggestions.Count) % _suggestions.Count;
+                AcceptSelected(false, true);
+                return;
+            }
+
+            if (!PopupVisible) return;
+
+            if (_suggestions.Count == 1) AcceptSelected(true, false);
+            else AcceptSelected(false, true);
+        }
+
+        private void AcceptSelected(bool p_addSpace, bool p_keepCycling)
+        {
+            string value = _suggestions[Mathf.Clamp(_selected, 0, _suggestions.Count - 1)];
+            string text = value.Any(char.IsWhiteSpace) ? $"\"{value}\"" : value;
+
+            _historyIndex = -1;
+            SetInput(_input.Substring(0, Mathf.Min(_tokenStart, _input.Length)) + text + (p_addSpace ? " " : string.Empty));
+
+            if (p_keepCycling)
+            {
+                _cycleInput = _input;
+                _suggestSource = _input; // keep the current list
+            }
+            else _cycleInput = null;
+        }
+
+        private void DrawPopup(Event p_event, Rect p_inputRect, float p_maxX)
+        {
+            int rows = Mathf.Min(_suggestions.Count, MaxPopupRows);
+            if (_selected < _popupFirst) _popupFirst = _selected;
+            if (_selected >= _popupFirst + rows) _popupFirst = _selected - rows + 1;
+            _popupFirst = Mathf.Clamp(_popupFirst, 0, Mathf.Max(0, _suggestions.Count - rows));
+
+            float rowHeight = _popupStyle.lineHeight + 4f;
+            float textWidth = 0f;
+            for (int i = _popupFirst; i < _popupFirst + rows; i++)
+                textWidth = Mathf.Max(textWidth, Measure(_popupStyle, _suggestions[i]));
+
+            float popupWidth = textWidth + _popupStyle.padding.horizontal + 10f;
+            // Opens under the start of the token being completed, like the chat suggestions in block games.
+            float x = p_inputRect.x + _inputStyle.padding.left - _popupStyle.padding.left +
+                      Measure(_inputStyle, _input.Substring(0, Mathf.Min(_tokenStart, _input.Length)));
+            x = Mathf.Clamp(x, p_inputRect.x, Mathf.Max(p_inputRect.x, p_maxX - popupWidth));
+            var popupRect = new Rect(x, p_inputRect.y - rows * rowHeight - 2f, popupWidth, rows * rowHeight);
+
+            GUI.DrawTexture(popupRect, _popupTexture);
+
+            for (int row = 0; row < rows; row++)
+            {
+                int index = _popupFirst + row;
+                var rowRect = new Rect(popupRect.x, popupRect.y + row * rowHeight, popupRect.width, rowHeight);
+                bool selected = index == _selected;
+
+                if (selected) GUI.DrawTexture(rowRect, _selectedTexture);
+                _popupStyle.normal.textColor = selected ? PopupSelected : PopupText;
+                GUI.Label(rowRect, _suggestions[index], _popupStyle);
+
+                if (p_event.type == EventType.MouseDown && p_event.button == 0 && rowRect.Contains(p_event.mousePosition))
                 {
-                    _historyIndex = -1;
-                    _input = string.Empty;
-                    _moveCaretToEnd = true;
-                    return;
+                    _selected = index;
+                    AcceptSelected(true, false);
+                    _focusInput = true;
+                    p_event.Use();
                 }
             }
 
-            _input = _history[_historyIndex];
-            _moveCaretToEnd = true;
+            // Scroll position when the list is longer than the popup.
+            if (_suggestions.Count > rows)
+            {
+                float barHeight = popupRect.height * rows / _suggestions.Count;
+                float barY = popupRect.y + (popupRect.height - barHeight) * _popupFirst / (_suggestions.Count - rows);
+                GUI.DrawTexture(new Rect(popupRect.xMax - 3f, barY, 3f, barHeight), _selectedTexture);
+            }
+
+            if (p_event.type == EventType.ScrollWheel && popupRect.Contains(p_event.mousePosition))
+            {
+                MoveSelection(p_event.delta.y > 0 ? +1 : -1);
+                p_event.Use();
+            }
         }
 
-        private void Autocomplete()
+        // Grey preview of the rest of the selected suggestion, after the typed text.
+        private void DrawGhostText(Rect p_inputRect)
         {
-            int space = _input.IndexOf(' ');
+            if (!PopupVisible || _partialQuoted || _cycleInput == _input) return;
 
-            // Completing the command name.
-            if (space < 0)
-            {
-                string typed = _input.Trim();
-                List<string> names = DevCommandRegistry.All
-                    .Select(c => c.Name)
-                    .Where(n => n.StartsWith(typed, StringComparison.OrdinalIgnoreCase))
-                    .ToList();
+            string suggestion = _suggestions[Mathf.Clamp(_selected, 0, _suggestions.Count - 1)];
+            if (suggestion.Any(char.IsWhiteSpace) || suggestion.Length <= _partial.Length ||
+                !suggestion.StartsWith(_partial, StringComparison.OrdinalIgnoreCase)) return;
 
-                ApplyCompletion(names, typed, p_match => p_match + " ", p_prefix => p_prefix);
-                return;
-            }
-
-            // Completing the first argument.
-            string commandName = _input.Substring(0, space);
-            if (!DevCommandRegistry.TryGet(commandName, out DevCommand command) || !command.HasSuggestions) return;
-
-            string partial = _input.Substring(space + 1).TrimStart().Trim('"');
-            List<string> options = command.GetSuggestions().ToList();
-            List<string> matches = options.Where(o => o.StartsWith(partial, StringComparison.OrdinalIgnoreCase)).ToList();
-            if (matches.Count == 0)
-                matches = options.Where(o => o.IndexOf(partial, StringComparison.OrdinalIgnoreCase) >= 0).ToList();
-
-            ApplyCompletion(matches, partial,
-                p_match => $"{command.Name} {Quote(p_match)} ",
-                p_prefix => $"{command.Name} {p_prefix}");
+            float x = p_inputRect.x + _inputStyle.padding.left + Measure(_inputStyle, _input);
+            if (x >= p_inputRect.xMax - 8f) return;
+            GUI.Label(new Rect(x, p_inputRect.y, p_inputRect.xMax - x, p_inputRect.height), suggestion.Substring(_partial.Length), _ghostStyle);
         }
+        #endregion
 
-        private void ApplyCompletion(List<string> p_matches, string p_typed, Func<string, string> p_full, Func<string, string> p_partial)
-        {
-            if (p_matches.Count == 0) return;
-
-            if (p_matches.Count == 1)
-            {
-                _input = p_full(p_matches[0]);
-                _moveCaretToEnd = true;
-                return;
-            }
-
-            // Several matches: extend to their shared prefix and list them.
-            string common = CommonPrefix(p_matches);
-            if (common.Length > p_typed.Length && common.StartsWith(p_typed, StringComparison.OrdinalIgnoreCase))
-            {
-                _input = p_partial(common);
-                _moveCaretToEnd = true;
-            }
-
-            AddLine(string.Join("   ", p_matches.Take(MaxListedMatches)) +
-                    (p_matches.Count > MaxListedMatches ? $"   (+{p_matches.Count - MaxListedMatches} more)" : string.Empty),
-                    LineKind.Echo);
-            _scrollToBottom = true;
-        }
-
+        #region HINT
         private void RefreshHint()
         {
-            if (_hintSource == _input) return;
+            int selected = PopupVisible ? _selected : -1;
+            if (_hintSource == _input && _hintSelected == selected) return;
             _hintSource = _input;
+            _hintSelected = selected;
+            _hintSegments.Clear();
 
-            int space = _input.IndexOf(' ');
-            if (space < 0)
+            if (_input.Trim().Length == 0)
             {
-                string typed = _input.Trim();
-                IEnumerable<string> commands = DevCommandRegistry.All
-                    .Where(c => typed.Length == 0 || c.Name.StartsWith(typed, StringComparison.OrdinalIgnoreCase))
-                    .Select(c => c.Name);
-                _hint = string.Join("   ", commands.Take(12));
+                _hintSegments.Add((string.Join("   ", DevCommandRegistry.All.Select(c => c.Name)), HintDim));
                 return;
             }
 
-            if (!DevCommandRegistry.TryGet(_input.Substring(0, space), out DevCommand command))
+            // Still typing the command name: describe the highlighted (or typed) command.
+            if (_tokens.Count == 0)
             {
-                _hint = string.Empty;
+                string name = selected >= 0 ? _suggestions[selected] : _partial;
+                if (DevCommandRegistry.TryGet(name, out DevCommand typed)) AddUsage(typed, -1);
+                else if (_suggestions.Count == 0) _hintSegments.Add(($"Unknown command '{_partial}'.", HintError));
                 return;
             }
 
-            _hint = command.Usage;
-            if (!command.HasSuggestions) return;
+            if (!DevCommandRegistry.TryGet(_tokens[0], out DevCommand command))
+            {
+                _hintSegments.Add(($"Unknown command '{_tokens[0]}'. Type 'help' for a list.", HintError));
+                return;
+            }
 
-            string partial = _input.Substring(space + 1).TrimStart().Trim('"');
-            List<string> matches = command.GetSuggestions()
-                .Where(o => o.IndexOf(partial, StringComparison.OrdinalIgnoreCase) >= 0)
-                .Take(8)
-                .ToList();
-            if (matches.Count > 0) _hint += "      " + string.Join("   ", matches);
+            int current = _tokens.Count - 1; // index of the argument being typed
+            AddUsage(command, current);
+
+            // First invalid argument, the one being typed included.
+            for (int i = 1; i <= _tokens.Count; i++)
+            {
+                bool isPartial = i == _tokens.Count;
+                if (isPartial && _partial.Length == 0 && !_partialQuoted) break;
+
+                string raw = isPartial ? _partial : _tokens[i];
+                if (command.ValidateArgument(i - 1, raw, out string error))
+                    continue;
+
+                _hintSegments.Add(("   " + error, HintError));
+                return;
+            }
+
+            if (command.Description.Length > 0) _hintSegments.Add(("   " + command.Description, HintDim));
         }
 
-        private static string Quote(string p_value) => p_value.Contains(' ') ? $"\"{p_value}\"" : p_value;
-
-        private static string CommonPrefix(List<string> p_values)
+        // "kill [target]" with the argument at p_argIndex highlighted; p_argIndex -1 highlights the name.
+        private void AddUsage(DevCommand p_command, int p_argIndex)
         {
-            string prefix = p_values[0];
-            foreach (string value in p_values)
+            _hintSegments.Add((p_command.Name, p_argIndex < 0 ? HintActive : HintDim));
+
+            int active = p_command.UsageIndexFor(p_argIndex);
+            for (int i = 0; i < p_command.UsageArguments.Count; i++)
+                _hintSegments.Add((" " + p_command.UsageArguments[i], i == active ? HintActive : HintDim));
+
+            if (p_argIndex < 0 && p_command.Description.Length > 0)
+                _hintSegments.Add(("   " + p_command.Description, HintDim));
+        }
+
+        private void DrawHint(Rect p_rect)
+        {
+            GUI.BeginClip(p_rect);
+            float x = 0f;
+            foreach ((string text, Color color) in _hintSegments)
             {
-                int length = 0;
-                int max = Mathf.Min(prefix.Length, value.Length);
-                while (length < max && char.ToLowerInvariant(prefix[length]) == char.ToLowerInvariant(value[length])) length++;
-                prefix = prefix.Substring(0, length);
+                float segmentWidth = Measure(_hintStyle, text);
+                _hintStyle.normal.textColor = color;
+                GUI.Label(new Rect(x, 0f, segmentWidth + 4f, p_rect.height), text, _hintStyle);
+                x += segmentWidth;
+                if (x > p_rect.width) break;
             }
-            return prefix;
+            GUI.EndClip();
         }
         #endregion
 
@@ -532,6 +771,8 @@ namespace Greeny.EditorTools
 
             _panelTexture = MakeTexture(new Color(0.06f, 0.07f, 0.09f, 0.92f));
             _inputTexture = MakeTexture(new Color(0.14f, 0.15f, 0.19f, 1f));
+            _popupTexture = MakeTexture(new Color(0.02f, 0.02f, 0.03f, 0.95f));
+            _selectedTexture = MakeTexture(new Color(0.25f, 0.27f, 0.33f, 1f));
 
             // Monospace where the OS has one; falls back to the default IMGUI font otherwise.
             _font = Font.CreateDynamicFontFromOSFont(new[] { "Consolas", "Menlo", "DejaVu Sans Mono", "Courier New" }, 15);
@@ -551,14 +792,38 @@ namespace Greeny.EditorTools
                 font = _font,
                 fontSize = 16,
                 alignment = TextAnchor.MiddleLeft,
+                richText = false,
                 padding = new RectOffset(8, 8, 4, 4),
             };
             _inputStyle.normal.background = _inputStyle.focused.background = _inputStyle.hover.background = null;
             _inputStyle.normal.textColor = _inputStyle.focused.textColor = _inputStyle.hover.textColor = Color.white;
 
-            _hintStyle = new GUIStyle(_lineStyle) { fontSize = 13, wordWrap = false, clipping = TextClipping.Clip };
-            _hintStyle.normal.textColor = new Color(0.55f, 0.6f, 0.68f);
+            _ghostStyle = new GUIStyle(_lineStyle)
+            {
+                fontSize = _inputStyle.fontSize,
+                wordWrap = false,
+                alignment = TextAnchor.MiddleLeft,
+                padding = new RectOffset(0, 0, _inputStyle.padding.top, _inputStyle.padding.bottom),
+                clipping = TextClipping.Clip,
+            };
+            _ghostStyle.normal.textColor = new Color(0.45f, 0.48f, 0.55f);
+
+            _hintStyle = new GUIStyle(_lineStyle) { fontSize = 13, wordWrap = false, clipping = TextClipping.Clip, padding = new RectOffset(0, 0, 1, 1) };
+            _hintStyle.normal.textColor = HintDim;
+
+            _popupStyle = new GUIStyle(_lineStyle)
+            {
+                fontSize = 15,
+                wordWrap = false,
+                alignment = TextAnchor.MiddleLeft,
+                clipping = TextClipping.Clip,
+                padding = new RectOffset(6, 6, 1, 1),
+            };
         }
+
+        // Width of the text alone. The "|" keeps trailing spaces from being ignored; padding cancels out.
+        private static float Measure(GUIStyle p_style, string p_text) =>
+            p_style.CalcSize(new GUIContent(p_text + "|")).x - p_style.CalcSize(new GUIContent("|")).x;
 
         private static Texture2D MakeTexture(Color p_color)
         {

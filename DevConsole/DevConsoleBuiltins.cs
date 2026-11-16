@@ -34,6 +34,27 @@ namespace Greeny.EditorTools
         [DevCommand("clear", "Clear the console output.")]
         private static void Clear() => DevConsole.Clear();
 
+        private enum HistoryAction { list, clear }
+
+        [DevCommand("history", "List the commands you ran (newest last), or forget them with 'history clear'.")]
+        private static string History(HistoryAction p_action = HistoryAction.list, int p_count = 30)
+        {
+            if (p_action == HistoryAction.clear)
+            {
+                DevConsole.ClearHistory();
+                return "History cleared.";
+            }
+
+            IReadOnlyList<string> history = DevConsole.History;
+            if (history.Count == 0) return "History is empty.";
+
+            int first = Mathf.Max(0, history.Count - Mathf.Max(1, p_count));
+            var sb = new StringBuilder($"History ({history.Count}, Up/Down in the input to recall):");
+            for (int i = first; i < history.Count; i++)
+                sb.Append('\n').Append((i + 1).ToString(CultureInfo.InvariantCulture).PadLeft(5)).Append("  ").Append(history[i]);
+            return sb.ToString();
+        }
+
         [DevCommand("timescale", "Show or set Time.timeScale (0 freezes, 1 is normal).", Usage = "timescale [scale:number]")]
         private static string TimeScale(float p_scale = -1f)
         {

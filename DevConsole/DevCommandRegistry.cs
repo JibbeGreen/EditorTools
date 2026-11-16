@@ -17,43 +17,113 @@ namespace Greeny.EditorTools
         public string Description { get; }
         public string Usage { get; }
 
+        /// <summary>The argument parts of <see cref="Usage"/> ("&lt;item&gt;", "[amount]"), used to highlight the one being typed.</summary>
+        public IReadOnlyList<string> UsageArguments { get; }
+
         private readonly MethodInfo _method;
         private readonly ParameterInfo[] _parameters;
         private readonly Action<string[]> _rawHandler;
-        private readonly Func<IEnumerable<string>> _suggestions;
+        private readonly DevSuggestionProvider _suggestions;          // command level, any argument
+        private readonly DevSuggestionProvider[] _parameterSuggestions; // per parameter (attribute, bool, enum)
 
-        internal DevCommand(string p_name, string p_description, MethodInfo p_method, Func<IEnumerable<string>> p_suggestions, string p_usage = null)
+        internal DevCommand(string p_name, string p_description, MethodInfo p_method, DevSuggestionProvider p_suggestions,
+                            DevSuggestionProvider[] p_parameterSuggestions, string p_usage = null)
         {
             Name = p_name;
             Description = p_description ?? string.Empty;
             _method = p_method;
             _parameters = p_method.GetParameters();
             _suggestions = p_suggestions;
+            _parameterSuggestions = p_parameterSuggestions;
             Usage = string.IsNullOrWhiteSpace(p_usage) ? BuildUsage() : p_usage;
+            UsageArguments = SplitUsage(Usage);
         }
 
-        internal DevCommand(string p_name, string p_description, Action<string[]> p_handler, Func<IEnumerable<string>> p_suggestions)
+        internal DevCommand(string p_name, string p_description, Action<string[]> p_handler, DevSuggestionProvider p_suggestions, string p_usage = null)
         {
             Name = p_name;
             Description = p_description ?? string.Empty;
             _rawHandler = p_handler;
             _suggestions = p_suggestions;
-            Usage = $"{p_name} [args...]";
+            _parameters = Array.Empty<ParameterInfo>();
+            Usage = string.IsNullOrWhiteSpace(p_usage) ? $"{p_name} [args...]" : p_usage;
+            UsageArguments = SplitUsage(Usage);
         }
 
-        /// <summary>Values for the first argument (Tab completion), or empty.</summary>
-        public IEnumerable<string> GetSuggestions()
+        #region SUGGESTIONS
+        public bool HasSuggestions => _suggestions != null || (_parameterSuggestions?.Any(s => s != null) ?? false);
+
+        /// <summary>Values for the first argument, or empty.</summary>
+        public IEnumerable<string> GetSuggestions() => GetSuggestions(0, Array.Empty<string>());
+
+        /// <summary>Values for argument <paramref name="p_argIndex"/>; <paramref name="p_args"/> are the arguments typed before it.</summary>
+        public IEnumerable<string> GetSuggestions(int p_argIndex, IReadOnlyList<string> p_args)
         {
-            if (_suggestions == null) return Enumerable.Empty<string>();
-            try { return _suggestions() ?? Enumerable.Empty<string>(); }
+            IEnumerable<string> result = Invoke(_suggestions, p_argIndex, p_args);
+            if (result != null) return result;
+
+            int parameter = ParameterIndexFor(p_argIndex);
+            if (parameter < 0 || _parameterSuggestions == null) return Enumerable.Empty<string>();
+            return Invoke(_parameterSuggestions[parameter], p_argIndex, p_args) ?? Enumerable.Empty<string>();
+        }
+
+        private static IEnumerable<string> Invoke(DevSuggestionProvider p_provider, int p_argIndex, IReadOnlyList<string> p_args)
+        {
+            if (p_provider == null) return null;
+            try
+            {
+                // Materialised here so a provider that throws while enumerating is caught too.
+                return p_provider(p_argIndex, p_args)?.Where(s => !string.IsNullOrEmpty(s)).ToList();
+            }
             catch (Exception e)
             {
                 Debug.LogException(e);
-                return Enumerable.Empty<string>();
+                return null;
             }
         }
 
-        public bool HasSuggestions => _suggestions != null;
+        /// <summary>Index into <see cref="UsageArguments"/> for argument <paramref name="p_argIndex"/>, or -1 past the end.</summary>
+        public int UsageIndexFor(int p_argIndex)
+        {
+            if (UsageArguments.Count == 0 || p_argIndex < 0) return -1;
+            if (p_argIndex < UsageArguments.Count) return p_argIndex;
+
+            string last = UsageArguments[^1];
+            bool repeats = last.EndsWith("...]") || last.EndsWith("...>");
+            bool restOfLine = _method != null && _parameters.Length > 0 && _parameters[^1].ParameterType == typeof(string);
+            return repeats || restOfLine ? UsageArguments.Count - 1 : -1;
+        }
+
+        /// <summary>Checks one typed argument against its parameter type. Raw (runtime) commands accept everything.</summary>
+        public bool ValidateArgument(int p_argIndex, string p_raw, out string p_error)
+        {
+            p_error = null;
+            if (_method == null) return true;
+
+            int index = ParameterIndexFor(p_argIndex);
+            if (index < 0)
+            {
+                p_error = "Too many arguments.";
+                return false;
+            }
+
+            Type type = _parameters[index].ParameterType;
+            if (type == typeof(string) || type == typeof(string[]) || TryConvert(p_raw, type, out _)) return true;
+
+            p_error = $"'{p_raw}' is not a valid {FriendlyType(type)} for '{CleanName(_parameters[index])}'.";
+            return false;
+        }
+
+        // Which parameter receives argument p_argIndex: trailing string / string[] parameters take the rest.
+        private int ParameterIndexFor(int p_argIndex)
+        {
+            if (_parameters.Length == 0 || p_argIndex < 0) return -1;
+            if (p_argIndex < _parameters.Length) return p_argIndex;
+
+            Type last = _parameters[^1].ParameterType;
+            return last == typeof(string) || last == typeof(string[]) ? _parameters.Length - 1 : -1;
+        }
+        #endregion
 
         /// <summary>Runs the command with the already tokenized arguments (command name excluded).</summary>
         internal void Execute(IReadOnlyList<string> p_args)
@@ -183,8 +253,33 @@ namespace Greeny.EditorTools
             return sb.ToString();
         }
 
+        // "give <item> [amount:int=1]" -> "<item>", "[amount:int=1]". Spaces inside <> or [] don't split.
+        private static IReadOnlyList<string> SplitUsage(string p_usage)
+        {
+            var parts = new List<string>();
+            var current = new StringBuilder();
+            int depth = 0;
+
+            foreach (char c in p_usage ?? string.Empty)
+            {
+                if (c is '<' or '[') depth++;
+                else if (c is '>' or ']') depth = Mathf.Max(0, depth - 1);
+
+                if (char.IsWhiteSpace(c) && depth == 0)
+                {
+                    if (current.Length > 0) parts.Add(current.ToString());
+                    current.Clear();
+                }
+                else current.Append(c);
+            }
+            if (current.Length > 0) parts.Add(current.ToString());
+
+            if (parts.Count > 0) parts.RemoveAt(0); // the command name
+            return parts;
+        }
+
         // Strips the p_ / _ prefixes used in this codebase so usage reads "give <item> [amount]".
-        private static string CleanName(ParameterInfo p_parameter)
+        internal static string CleanName(ParameterInfo p_parameter)
         {
             string name = p_parameter.Name ?? "arg";
             if (name.StartsWith("p_")) name = name.Substring(2);
@@ -207,6 +302,8 @@ namespace Greeny.EditorTools
     {
         private static Dictionary<string, DevCommand> _commands;
 
+        private static readonly string[] BoolValues = { "true", "false" };
+
         public static IEnumerable<DevCommand> All
         {
             get
@@ -223,11 +320,20 @@ namespace Greeny.EditorTools
         }
 
         /// <summary>Adds a command from code (e.g. a lambda that needs scene state). Replaces one with the same name.</summary>
+        /// <param name="p_suggestions">Values for the first argument.</param>
         public static void Register(string p_name, string p_description, Action<string[]> p_handler, Func<IEnumerable<string>> p_suggestions = null)
+        {
+            DevSuggestionProvider provider = null;
+            if (p_suggestions != null) provider = (p_index, _) => p_index == 0 ? p_suggestions() : null;
+            Register(p_name, p_description, p_handler, provider);
+        }
+
+        /// <summary>Adds a command from code with suggestions for any argument and an optional usage line.</summary>
+        public static void Register(string p_name, string p_description, Action<string[]> p_handler, DevSuggestionProvider p_suggestions, string p_usage = null)
         {
             EnsureBuilt();
             if (string.IsNullOrWhiteSpace(p_name) || p_handler == null) return;
-            _commands[p_name.Trim()] = new DevCommand(p_name.Trim(), p_description, p_handler, p_suggestions);
+            _commands[p_name.Trim()] = new DevCommand(p_name.Trim(), p_description, p_handler, p_suggestions, p_usage);
         }
 
         public static void Unregister(string p_name)
@@ -250,6 +356,8 @@ namespace Greeny.EditorTools
                     continue;
                 }
 
+                DevSuggestionProvider[] parameterSuggestions = method.GetParameters().Select(p => ResolveParameterSuggestions(method, p)).ToArray();
+
                 foreach (DevCommandAttribute attribute in method.GetCustomAttributes<DevCommandAttribute>())
                 {
                     string name = attribute.Name?.Trim();
@@ -265,43 +373,102 @@ namespace Greeny.EditorTools
                         continue;
                     }
 
-                    _commands[name] = new DevCommand(name, attribute.Description, method, ResolveSuggestions(method, attribute), attribute.Usage);
+                    _commands[name] = new DevCommand(name, attribute.Description, method, ResolveCommandSuggestions(method, attribute),
+                                                     parameterSuggestions, attribute.Usage);
                 }
             }
         }
 
-        private static Func<IEnumerable<string>> ResolveSuggestions(MethodInfo p_command, DevCommandAttribute p_attribute)
+        #region SUGGESTION PROVIDERS
+        private const BindingFlags ProviderFlags = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
+
+        // [DevCommand(Suggestions = "M")]: M() for the first argument, or M(int, IReadOnlyList<string>) for any.
+        private static DevSuggestionProvider ResolveCommandSuggestions(MethodInfo p_command, DevCommandAttribute p_attribute)
         {
             if (string.IsNullOrEmpty(p_attribute.Suggestions)) return null;
 
-            const BindingFlags flags = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
-            MethodInfo provider = p_command.DeclaringType?.GetMethod(p_attribute.Suggestions, flags, null, Type.EmptyTypes, null);
-
-            if (provider == null || !typeof(IEnumerable<string>).IsAssignableFrom(provider.ReturnType))
+            foreach (MethodInfo provider in FindProviders(p_command, p_attribute.Suggestions))
             {
-                Debug.LogWarning($"[DevConsole] '{p_attribute.Name}': suggestions method '{p_attribute.Suggestions}' must be a " +
-                                 $"parameterless static method on {p_command.DeclaringType?.Name} returning IEnumerable<string>.");
-                return null;
+                ParameterInfo[] parameters = provider.GetParameters();
+                if (parameters.Length == 0)
+                    return (p_index, _) => p_index == 0 ? (IEnumerable<string>)provider.Invoke(null, null) : null;
+
+                if (parameters.Length == 2 && parameters[0].ParameterType == typeof(int) &&
+                    parameters[1].ParameterType.IsAssignableFrom(typeof(string[])))
+                    return (p_index, p_args) => (IEnumerable<string>)provider.Invoke(null, new object[] { p_index, p_args.ToArray() });
             }
 
-            return () => (IEnumerable<string>)provider.Invoke(null, null);
+            Debug.LogWarning($"[DevConsole] '{p_attribute.Name}': suggestions method '{p_attribute.Suggestions}' must be a static method on " +
+                             $"{p_command.DeclaringType?.Name} returning IEnumerable<string>, taking () or (int, IReadOnlyList<string>).");
+            return null;
         }
+
+        // [DevSuggestions("M")] on a parameter: M() or M(IReadOnlyList<string>). Otherwise bool / enum values.
+        private static DevSuggestionProvider ResolveParameterSuggestions(MethodInfo p_command, ParameterInfo p_parameter)
+        {
+            DevSuggestionsAttribute attribute = p_parameter.GetCustomAttribute<DevSuggestionsAttribute>();
+            if (attribute != null && !string.IsNullOrEmpty(attribute.Method))
+            {
+                foreach (MethodInfo provider in FindProviders(p_command, attribute.Method))
+                {
+                    ParameterInfo[] parameters = provider.GetParameters();
+                    if (parameters.Length == 0)
+                        return (_, _) => (IEnumerable<string>)provider.Invoke(null, null);
+
+                    if (parameters.Length == 1 && parameters[0].ParameterType.IsAssignableFrom(typeof(string[])))
+                        return (_, p_args) => (IEnumerable<string>)provider.Invoke(null, new object[] { p_args.ToArray() });
+                }
+
+                Debug.LogWarning($"[DevConsole] {p_command.DeclaringType?.Name}.{p_command.Name}({p_parameter.Name}): suggestions method " +
+                                 $"'{attribute.Method}' must be static, return IEnumerable<string> and take () or (IReadOnlyList<string>).");
+            }
+
+            Type type = p_parameter.ParameterType;
+            if (type == typeof(bool)) return (_, _) => BoolValues;
+            if (type.IsEnum)
+            {
+                string[] names = Enum.GetNames(type);
+                return (_, _) => names;
+            }
+            return null;
+        }
+
+        private static IEnumerable<MethodInfo> FindProviders(MethodInfo p_command, string p_name) =>
+            p_command.DeclaringType?.GetMethods(ProviderFlags)
+                .Where(m => m.Name == p_name && typeof(IEnumerable<string>).IsAssignableFrom(m.ReturnType))
+            ?? Enumerable.Empty<MethodInfo>();
+        #endregion
 
         #region PARSING
         /// <summary>Splits a line on spaces, keeping "quoted text" together.</summary>
-        public static List<string> Tokenize(string p_line)
+        public static List<string> Tokenize(string p_line) => Tokenize(p_line, out _, out _, out _);
+
+        /// <summary>
+        /// Tokenizes a line that is still being typed. <paramref name="p_partial"/> is the token under construction at
+        /// the end ("" after a trailing space), <paramref name="p_partialStart"/> its index in the line (the line length
+        /// after a trailing space) and <paramref name="p_quoted"/> whether it opened with a quote. When the line doesn't
+        /// end in whitespace, the returned list includes that last token.
+        /// </summary>
+        public static List<string> Tokenize(string p_line, out string p_partial, out int p_partialStart, out bool p_quoted)
         {
             var tokens = new List<string>();
+            p_partial = string.Empty;
+            p_partialStart = p_line?.Length ?? 0;
+            p_quoted = false;
             if (string.IsNullOrEmpty(p_line)) return tokens;
 
             var current = new StringBuilder();
             bool inQuotes = false;
             bool hasToken = false;
+            int start = 0;
+            bool startedQuoted = false;
 
-            foreach (char c in p_line)
+            for (int i = 0; i < p_line.Length; i++)
             {
+                char c = p_line[i];
                 if (c == '"')
                 {
+                    if (!hasToken) { start = i; startedQuoted = true; }
                     inQuotes = !inQuotes;
                     hasToken = true; // "" is a valid empty argument
                 }
@@ -310,15 +477,25 @@ namespace Greeny.EditorTools
                     if (hasToken) tokens.Add(current.ToString());
                     current.Clear();
                     hasToken = false;
+                    startedQuoted = false;
                 }
                 else
                 {
+                    if (!hasToken) { start = i; startedQuoted = false; }
                     current.Append(c);
                     hasToken = true;
                 }
             }
 
-            if (hasToken) tokens.Add(current.ToString());
+            if (hasToken)
+            {
+                // Callers that only want whole tokens (Execute) get the last one too.
+                tokens.Add(current.ToString());
+                p_partial = current.ToString();
+                p_partialStart = start;
+                p_quoted = startedQuoted;
+            }
+
             return tokens;
         }
 

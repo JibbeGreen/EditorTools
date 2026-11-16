@@ -1,0 +1,24 @@
+{
+    "name": "Greeny.EditorTools.DevConsole.Commands",
+    "rootNamespace": "Greeny.EditorTools",
+    "references": [
+        "Greeny.Actors",
+        "Greeny.Inventory",
+        "Unity.Cinemachine",
+        "Greeny.EditorTools.DevConsole",
+        "Greeny.Core",
+        "Greeny.Utils",
+        "Reflex"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [
+        "UNITY_EDITOR"
+    ],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
