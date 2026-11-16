@@ -1,6 +1,6 @@
 {
-    "name": "SceneSwitcher",
-    "rootNamespace": "SceneSwitcher",
+    "name": "Greeny.EditorTools.SceneSwitcher",
+    "rootNamespace": "Greeny.Editor",
     "references": [],
     "includePlatforms": [
         "Editor"

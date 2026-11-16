@@ -1,14 +1,18 @@
 {
-    "name": "com.greeny.sceneswitcher",
-    "version": "1.0.0",
-    "displayName": "Scene Switcher",
-    "description": "Scene Switching Tool by Greeny.",
+    "name": "com.greeny.editortools",
+    "version": "2.0.0",
+    "displayName": "Greeny Editor Tools",
+    "description": "Editor-only tools by Greeny: scene switcher menu and an in-game developer console (F1 in play mode).",
     "unity": "6000.6",
-    "dependencies": {},
+    "dependencies": {
+        "com.unity.inputsystem": "1.11.0"
+    },
     "keywords": [
         "tool",
         "greeny",
-        "scene"
+        "scene",
+        "console",
+        "debug"
     ],
     "author": {
         "name": "JibbeGreen",
