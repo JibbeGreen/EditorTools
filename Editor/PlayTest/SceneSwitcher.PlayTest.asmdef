@@ -1,0 +1,34 @@
+{
+    "name": "SceneSwitcher.PlayTest",
+    "rootNamespace": "Greeny.Editor",
+    "references": [
+        "Greeny.SceneManagement",
+        "Greeny.Persistence",
+        "UniTask"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": false,
+    "defineConstraints": [
+        "GREENY_SCENEMANAGEMENT",
+        "GREENY_PERSISTENCE"
+    ],
+    "versionDefines": [
+        {
+            "name": "com.greeny.scenemanagement",
+            "expression": "0.0.0",
+            "define": "GREENY_SCENEMANAGEMENT"
+        },
+        {
+            "name": "com.greeny.persistence",
+            "expression": "0.0.0",
+            "define": "GREENY_PERSISTENCE"
+        }
+    ],
+    "noEngineReferences": false
+}

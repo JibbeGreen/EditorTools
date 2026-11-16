@@ -4,13 +4,15 @@ using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
-namespace Greeny.Editor {
-
+namespace Greeny.Editor 
+{
     public static class SceneSwitcher
     {
         private const string MainMenuScene = "Assets/Scenes/MainMenu.unity";
+        private const string MainMenuEnvironmentScene = "Assets/Scenes/MainMenuEnvironment.unity";
         private const string GameplayScene = "Assets/Scenes/Gameplay.unity";
         private const string Level01Scene = "Assets/Scenes/Level01.unity";
+        private const string Level02Scene = "Assets/Scenes/Level02.unity";
         private const string BootstrapperScene = "Assets/Scenes/Bootstrapper.unity";
         private const string UIScene = "Assets/Scenes/UI.unity";
 
@@ -56,18 +58,31 @@ namespace Greeny.Editor {
         public static void LoadMainMenu()
         {
             OpenScenes(
-                MainMenuScene
+                BootstrapperScene,
+                MainMenuScene,
+                MainMenuEnvironmentScene
             );
         }
 
-        [MenuItem("Switch Scene/MainGame")]
-        public static void LoadMainGame()
+        [MenuItem("Switch Scene/Level01")]
+        public static void LoadLevel01()
         {
             OpenScenes(
+                BootstrapperScene,
                 GameplayScene,
                 Level01Scene,
-                UIScene,
-                BootstrapperScene
+                UIScene
+            );
+        }
+
+        [MenuItem("Switch Scene/Level02")]
+        public static void LoadLevel02()
+        {
+            OpenScenes(
+                BootstrapperScene,
+                GameplayScene,
+                Level02Scene,
+                UIScene
             );
         }
 
@@ -83,6 +98,7 @@ namespace Greeny.Editor {
         public static void LoadUIScene()
         {
             OpenScenes(
+                BootstrapperScene,
                 UIScene
             );
         }
